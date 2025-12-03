@@ -1,0 +1,109 @@
+name: CI-CD-Security-Terraform
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  lint-test:
+    name: Lint & Test Python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies (if houver)
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt || true; fi
+          pip install flake8 pytest pytest-cov
+
+      - name: Run flake8
+        run: |
+          mkdir -p reports
+          flake8 . --output-file=reports/flake8.txt || true
+
+      - name: Run pytest (se houver testes)
+        run: |
+          pytest --maxfail=1 --disable-warnings -q --junitxml=reports/junit.xml --cov=./ || true
+
+      - name: Upload lint/test reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-lint-test
+          path: reports
+
+  terraform-lint:
+    name: Terraform format & validate
+    runs-on: ubuntu-latest
+    needs: lint-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.6.0'
+
+      - name: Terraform fmt (check)
+        run: terraform fmt -check -recursive
+
+      - name: Terraform validate
+        run: terraform validate
+
+      - name: Upload terraform reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-terraform
+          path: reports
+
+  secrets-scan:
+    name: Scan de Segredos (gitleaks)
+    runs-on: ubuntu-latest
+    needs: terraform-lint
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/zricethezav/gitleaks/master/install.sh | bash -s -- -b /usr/local/bin || true
+
+      - name: Run gitleaks
+        run: |
+          mkdir -p reports
+          gitleaks detect --source . --report-path reports/gitleaks.json --report-format json || true
+
+      - name: Upload secrets report
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-secrets
+          path: reports/gitleaks.json
+
+  final:
+    name: Finalize artifacts & summary
+    runs-on: ubuntu-latest
+    needs: [lint-test, terraform-lint, secrets-scan]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare summary
+        run: |
+          mkdir -p final-evidence
+          echo "Resumo execução - $(date -u)" > final-evidence/summary.txt
+          cp -r reports final-evidence || true
+          ls -la final-evidence >> final-evidence/summary.txt || true
+
+      - name: Upload final artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-evidence
+          path: final-evidence
